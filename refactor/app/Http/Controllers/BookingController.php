@@ -2,9 +2,11 @@
 
 namespace DTApi\Http\Controllers;
 
+use Cassandra\Exception\ValidationException;
 use DTApi\Models\Job;
 use DTApi\Http\Requests;
 use DTApi\Models\Distance;
+use Exception;
 use Illuminate\Http\Request;
 use DTApi\Repository\BookingRepository;
 
@@ -35,17 +37,21 @@ class BookingController extends Controller
      */
     public function index(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
+        try {
+            $userId = $request->input('user_id');
+            $userType = $request->__authenticatedUser->user_type;
 
-            $response = $this->repository->getUsersJobs($user_id);
+            if ($userId) {
+                $response = $this->repository->getUsersJobs($userId);
+            } elseif ($userType == envv('ADMIN_ROLE_ID') || $userType == env('SUPERADMIN_ROLE_ID')) {
+                $response = $this->repository->getAll($request);
+            }
 
+            return response($response);
+        } catch (Exception $e) {
+           return response(['error' => $e->getMessage()]);
         }
-        elseif($request->__authenticatedUser->user_type == env('ADMIN_ROLE_ID') || $request->__authenticatedUser->user_type == env('SUPERADMIN_ROLE_ID'))
-        {
-            $response = $this->repository->getAll($request);
-        }
 
-        return response($response);
     }
 
     /**
@@ -54,7 +60,14 @@ class BookingController extends Controller
      */
     public function show($id)
     {
-        $job = $this->repository->with('translatorJobRel.user')->find($id);
+        try {
+            $job = $this->repository->with('translatorJobRel.user')->find($id);
+            if ($job === null) {
+                return response('Job not found', 404);
+            }
+        } catch (Exception $e) {
+            return response(['error' => $e->getMessage()]);
+        }
 
         return response($job);
     }
@@ -65,11 +78,27 @@ class BookingController extends Controller
      */
     public function store(Request $request)
     {
-        $data = $request->all();
+        try {
 
-        $response = $this->repository->store($request->__authenticatedUser, $data);
+            // I would definitely add validation rules here.
+            $validatedData = $request->validate([
+                'name' => 'required|string|max:255',
+                'description' => 'string',
+            ]);
 
-        return response($response);
+            // Check if validation fails
+            if ($validatedData->fails()) {
+                return response('validation error', 422);
+            }
+
+            $data = $request->all();
+
+            $response = $this->repository->store($request->__authenticatedUser, $data);
+
+        } catch (Exception $e) {
+            return response(['error' => $e->getMessage()]);
+        }
+        return response($response, 201);
 
     }
 
@@ -80,9 +109,25 @@ class BookingController extends Controller
      */
     public function update($id, Request $request)
     {
-        $data = $request->all();
-        $cuser = $request->__authenticatedUser;
-        $response = $this->repository->updateJob($id, array_except($data, ['_token', 'submit']), $cuser);
+        try {
+
+            // I would definitely add validation rules here.
+            $data = $request->validate([
+                'name' => 'required|string|max:255',
+                'description' => 'string',
+            ]);
+
+            // Check if validation fails
+            if ($data->fails()) {
+                return response('validation error', 422);
+            }
+
+            $cuser = $request->__authenticatedUser;
+            $response = $this->repository->updateJob($id, array_except($data, ['_token', 'submit']), $cuser);
+
+        } catch (Exception $e) {
+            return response(['error' => $e->getMessage()]);
+        }
 
         return response($response);
     }
@@ -93,12 +138,22 @@ class BookingController extends Controller
      */
     public function immediateJobEmail(Request $request)
     {
-        $adminSenderEmail = config('app.adminemail');
-        $data = $request->all();
 
-        $response = $this->repository->storeJobEmail($data);
+        try {
+            $data = $request->validate([
+                'email' => 'required|string|email|max:255',
+            ]);
 
-        return response($response);
+            $response = $this->repository->storeJobEmail($data);
+
+        } catch (ValidationException $e) {
+            // I would use validation exception here we can use this too instead of basic if condition
+            return response($e->validator->errors(), 422);
+        } catch (Exception $e) {
+            return response(['error' => $e->getMessage()]);
+        }
+
+        return response($response, 200);
     }
 
     /**
@@ -107,7 +162,7 @@ class BookingController extends Controller
      */
     public function getHistory(Request $request)
     {
-        if($user_id = $request->get('user_id')) {
+        if ($user_id = $request->get('user_id')) {
 
             $response = $this->repository->getUsersJobsHistory($user_id, $request);
             return response($response);
@@ -194,64 +249,53 @@ class BookingController extends Controller
 
     public function distanceFeed(Request $request)
     {
-        $data = $request->all();
 
-        if (isset($data['distance']) && $data['distance'] != "") {
-            $distance = $data['distance'];
-        } else {
-            $distance = "";
-        }
-        if (isset($data['time']) && $data['time'] != "") {
-            $time = $data['time'];
-        } else {
-            $time = "";
-        }
-        if (isset($data['jobid']) && $data['jobid'] != "") {
-            $jobid = $data['jobid'];
-        }
+        try {
 
-        if (isset($data['session_time']) && $data['session_time'] != "") {
-            $session = $data['session_time'];
-        } else {
-            $session = "";
-        }
 
-        if ($data['flagged'] == 'true') {
-            if($data['admincomment'] == '') return "Please, add comment";
-            $flagged = 'yes';
-        } else {
-            $flagged = 'no';
-        }
-        
-        if ($data['manually_handled'] == 'true') {
-            $manually_handled = 'yes';
-        } else {
-            $manually_handled = 'no';
-        }
+            $data = $request->all();
 
-        if ($data['by_admin'] == 'true') {
-            $by_admin = 'yes';
-        } else {
-            $by_admin = 'no';
-        }
+            //case 1 where we can use ternary operators instead of if else easy to use and less syntax (my fav way)
+            $jobid = $data['jobid'] ?? null;
+            $distance = $data['distance'] ?? null;
+            $time = $data['time'] ?? null;
+            $session = $data['session_time'] ?? null;
+            $flagged = $data['flagged'] === 'true' ? 'yes' : 'no';
+            $manually_handled = $data['manually_handled'] === 'true' ? 'yes' : 'no';
+            //this can be used too here both does the same thing its just way of coding style.
+            switch ($data['manually_handled']) {
+                case 'true':
+                    $manually_handled = 'yes';
+                    break;
+                default:
+                    $manually_handled = 'no';
+            }
+            $by_admin = $data['by_admin'] === 'true' ? 'yes' : 'no';
+            $admincomment = $data['admincomment'] ?? null;
 
-        if (isset($data['admincomment']) && $data['admincomment'] != "") {
-            $admincomment = $data['admincomment'];
-        } else {
-            $admincomment = "";
-        }
-        if ($time || $distance) {
 
-            $affectedRows = Distance::where('job_id', '=', $jobid)->update(array('distance' => $distance, 'time' => $time));
-        }
+            if ($distance !== null || $time !== null) {
+                Distance::where('job_id', $jobid)->update([
+                    'distance' => $distance,
+                    'time' => $time,
+                ]);
+            }
 
-        if ($admincomment || $session || $flagged || $manually_handled || $by_admin) {
-
-            $affectedRows1 = Job::where('id', '=', $jobid)->update(array('admin_comments' => $admincomment, 'flagged' => $flagged, 'session_time' => $session, 'manually_handled' => $manually_handled, 'by_admin' => $by_admin));
+            if ($session !== null || $admincomment !== null || $flagged !== 'no' || $manually_handled !== 'no' || $by_admin !== 'no') {
+                Job::where('id', $jobid)->update([
+                    'admin_comments' => $admincomment,
+                    'flagged' => $flagged,
+                    'session_time' => $session,
+                    'manually_handled' => $manually_handled,
+                    'by_admin' => $by_admin,
+                ]);
+            }
 
         }
-
-        return response('Record updated!');
+        catch (Exception $e){
+            return response(['error' => $e->getMessage()]);
+        }
+        return response('Record updated!',201);
     }
 
     public function reopen(Request $request)
